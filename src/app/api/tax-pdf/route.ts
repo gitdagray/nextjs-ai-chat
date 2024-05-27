@@ -1,18 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { Message as VercelChatMessage, StreamingTextResponse, OpenAIStream } from "ai";
+import { Message as VercelChatMessage, StreamingTextResponse, LangChainStream } from "ai";
 
 import { createClient } from "@supabase/supabase-js";
-import { Readable } from 'stream';
 
 import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
 import { PromptTemplate } from "@langchain/core/prompts";
 import { SupabaseVectorStore } from "@langchain/community/vectorstores/supabase";
 import { Document } from "@langchain/core/documents";
 import { RunnableSequence } from "@langchain/core/runnables";
-import {
-  BytesOutputParser,
-  StringOutputParser,
-} from "@langchain/core/output_parsers";
+import { StringOutputParser } from "@langchain/core/output_parsers";
 
 import OpenAI from 'openai';
 
@@ -20,7 +16,7 @@ export const runtime = "edge";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
-  });
+});
 
 const combineDocumentsFn = (docs: Document[]) => {
   const serializedDocs = docs.map((doc) => doc.content);
@@ -40,20 +36,19 @@ const formatVercelMessages = (chatHistory: VercelChatMessage[]) => {
   return formattedDialogueTurns.join("\n");
 };
 
-const CONDENSE_QUESTION_TEMPLATE = `Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question, in its original language.
+const CONDENSE_QUESTION_TEMPLATE = `Given the following conversation and a follow-up question, rephrase the follow-up question to be a standalone question, in its original language.
 
 <chat_history>
   {chat_history}
 </chat_history>
 
-Follow Up Input: {question}
+Follow-Up Input: {question}
 Standalone question:`;
 const condenseQuestionPrompt = PromptTemplate.fromTemplate(
   CONDENSE_QUESTION_TEMPLATE,
 );
 
-const ANSWER_TEMPLATE = `You are an energetic talking puppy named Dana, and must answer all questions like a happy, talking dog would.
-Use lots of puns!
+const ANSWER_TEMPLATE = `You are an energetic talking puppy named Dana, and must answer all questions like a happy, talking dog would. Use lots of puns!
 
 Answer the question based only on the following context and chat history:
 <context>
@@ -68,21 +63,6 @@ Question: {question}
 `;
 const answerPrompt = PromptTemplate.fromTemplate(ANSWER_TEMPLATE);
 
-// Function to generate embeddings for the input text
-async function getEmbedding(content:string) {
-  const embedding = await openai.embeddings.create({
-    model: 'text-embedding-3-small', 
-    input: content,
-  });
-  return embedding.data[0].embedding;
-}
-
-/**
- * This handler initializes and calls a retrieval chain. It composes the chain using
- * LangChain Expression Language. See the docs for more information:
- *
- * https://js.langchain.com/docs/guides/expression_language/cookbook#conversational-retrieval-chain
- */
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -112,25 +92,20 @@ export async function POST(req: NextRequest) {
 
     console.log('Vector store initialized');
 
-    /**
-     * We use LangChain Expression Language to compose two chains.
-     * To learn more, see the guide here:
-     *
-     * https://js.langchain.com/docs/guides/expression_language/cookbook
-     *
-     * You can also use the "createRetrievalChain" method with a
-     * "historyAwareRetriever" to get something prebaked.
-     */
     const standaloneQuestionChain = RunnableSequence.from([
       condenseQuestionPrompt,
       model,
       new StringOutputParser(),
     ]);
 
+    console.log('Standalone question chain initialized');
+
     let resolveWithDocuments: (value: Document[]) => void;
     const documentPromise = new Promise<Document[]>((resolve) => {
       resolveWithDocuments = resolve;
     });
+
+    console.log('Document promise initialized');
 
     const retriever = vectorstore.asRetriever({
       k: 3, // Number of documents to retrieve
@@ -145,7 +120,11 @@ export async function POST(req: NextRequest) {
       ]
     });
 
+    console.log('Retriever initialized');
+
     const retrievalChain = retriever.pipe(combineDocumentsFn);
+
+    console.log('Retrieval chain initialized');
 
     const answerChain = RunnableSequence.from([
       {
@@ -160,98 +139,60 @@ export async function POST(req: NextRequest) {
       model,
     ]);
 
+    console.log('Answer chain initialized');
+
     const conversationalRetrievalQAChain = RunnableSequence.from([
       {
         question: standaloneQuestionChain,
         chat_history: (input) => input.chat_history,
       },
       answerChain,
-      // new BytesOutputParser(),
     ]);
 
-    const test = await conversationalRetrievalQAChain.invoke({
+    console.log('Conversational retrieval QA chain initialized');
+
+    const streamResult = await conversationalRetrievalQAChain.stream({
       question: currentMessageContent,
       chat_history: formatVercelMessages(previousMessages),
     });
 
-    // console.log('test', test);
-
-    // console.log('currentMessageContent',currentMessageContent)
-    // const stream = await conversationalRetrievalQAChain.stream({
-    //   question: currentMessageContent,
-    //   chat_history: formatVercelMessages(previousMessages),
-    // });
+    console.log('Stream result received');
 
     const documents = await documentPromise;
-
-    if (documents.length === 0) {
-      // If no documents are found, return a default response
-      return NextResponse.json({
-        message: "Eu não tenho essa informação",
-        headers: {
-          "x-message-index": (previousMessages.length + 1).toString(),
-        },
-      });
-    }
-
     const serializedSources = Buffer.from(
       JSON.stringify(
         documents.map((doc) => {
           return {
-            content: doc.content,
+            pageContent: doc.content,
             metadata: doc.metadata,
           };
         }),
       ),
     ).toString("base64");
 
-    // let streamedResult = "";
-    // for await (const chunk of stream) {
-    //   streamedResult += chunk;
-    //   console.log(streamedResult);
-    // }
+    console.log('documents:', documents);
 
-    // const testStream = new Readable({
-    //   read() {
-    //     this.push(test.content); // Push the content to the stream
-    //     this.push(null);         // Signal that no more data is coming
-    //   }
-    // });
-
-    const contentString = String(test.content);
-
-    // Assuming test.content is your final string response
-    const responseMessage = {
-      content: contentString,
-      role: 'assistant'
-    };
-
-    // Wrap in a standard JSON structure
-    return new NextResponse(JSON.stringify({ messages: [responseMessage] }), {
-      headers: {
-        'Content-Type': 'application/json',
-        "x-message-index": (previousMessages.length + 1).toString(),
+    const transformedStreamResult = new ReadableStream({
+      async start(controller) {
+        for await (const chunk of streamResult) {
+          if (typeof chunk === 'string') {
+            controller.enqueue(chunk);
+          } else {
+            controller.enqueue(JSON.stringify(chunk));
+          }
+        }
+        controller.close();
       },
     });
 
-    // console.log('Content string:', contentString);
-
-    // const stream = new ReadableStream({
-    //   start(controller) {
-    //     // controller.enqueue(new TextEncoder().encode(contentString));  // Encode the string into a Uint8Array
-    //     const dataWithDelimiter = contentString + "\n";
-    //     controller.enqueue(dataWithDelimiter);  
-    //     controller.close();  // Close the stream after enqueueing
-    //   }
-    // });
-
-    // return new StreamingTextResponse(stream, {
-    //   headers: {
-    //     "x-message-index": (previousMessages.length + 1).toString(),
-    //     "x-sources": serializedSources,
-    //   },
-    // });
+    return new StreamingTextResponse(transformedStreamResult, {
+      headers: {
+        "x-message-index": (previousMessages.length + 1).toString(),
+        "x-sources": serializedSources,
+      },
+    });
   } catch (e: any) {
+    console.error("Error processing request:", e);
     return NextResponse.json({ error: e.message }, { status: e.status ?? 500 });
   }
 }
