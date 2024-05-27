@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { Message as VercelChatMessage, StreamingTextResponse } from "ai";
+import { Message as VercelChatMessage, StreamingTextResponse, OpenAIStream } from "ai";
 
 import { createClient } from "@supabase/supabase-js";
+import { Readable } from 'stream';
 
 import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
 import { PromptTemplate } from "@langchain/core/prompts";
@@ -22,7 +23,7 @@ const openai = new OpenAI({
   });
 
 const combineDocumentsFn = (docs: Document[]) => {
-  const serializedDocs = docs.map((doc) => doc.pageContent);
+  const serializedDocs = docs.map((doc) => doc.content);
   return serializedDocs.join("\n\n");
 };
 
@@ -111,10 +112,6 @@ export async function POST(req: NextRequest) {
 
     console.log('Vector store initialized');
 
-    const queryEmbedding = await getEmbedding(currentMessageContent);
-
-    console.log('Query embedding:', queryEmbedding);
-
     /**
      * We use LangChain Expression Language to compose two chains.
      * To learn more, see the guide here:
@@ -169,17 +166,23 @@ export async function POST(req: NextRequest) {
         chat_history: (input) => input.chat_history,
       },
       answerChain,
-      new BytesOutputParser(),
+      // new BytesOutputParser(),
     ]);
 
-    const stream = await conversationalRetrievalQAChain.stream({
+    const test = await conversationalRetrievalQAChain.invoke({
       question: currentMessageContent,
       chat_history: formatVercelMessages(previousMessages),
     });
 
-    const documents = await documentPromise;
+    // console.log('test', test);
 
-    console.log('Final retrieved documents:', documents);
+    // console.log('currentMessageContent',currentMessageContent)
+    // const stream = await conversationalRetrievalQAChain.stream({
+    //   question: currentMessageContent,
+    //   chat_history: formatVercelMessages(previousMessages),
+    // });
+
+    const documents = await documentPromise;
 
     if (documents.length === 0) {
       // If no documents are found, return a default response
@@ -195,21 +198,59 @@ export async function POST(req: NextRequest) {
       JSON.stringify(
         documents.map((doc) => {
           return {
-            pageContent: doc.pageContent.slice(0, 50) + "...",
+            content: doc.content,
             metadata: doc.metadata,
           };
         }),
       ),
     ).toString("base64");
 
-    console.log('Serialized sources:', serializedSources);
+    // let streamedResult = "";
+    // for await (const chunk of stream) {
+    //   streamedResult += chunk;
+    //   console.log(streamedResult);
+    // }
 
-    return new StreamingTextResponse(stream, {
+    // const testStream = new Readable({
+    //   read() {
+    //     this.push(test.content); // Push the content to the stream
+    //     this.push(null);         // Signal that no more data is coming
+    //   }
+    // });
+
+    const contentString = String(test.content);
+
+    // Assuming test.content is your final string response
+    const responseMessage = {
+      content: contentString,
+      role: 'assistant'
+    };
+
+    // Wrap in a standard JSON structure
+    return new NextResponse(JSON.stringify({ messages: [responseMessage] }), {
       headers: {
+        'Content-Type': 'application/json',
         "x-message-index": (previousMessages.length + 1).toString(),
-        "x-sources": serializedSources,
       },
     });
+
+    // console.log('Content string:', contentString);
+
+    // const stream = new ReadableStream({
+    //   start(controller) {
+    //     // controller.enqueue(new TextEncoder().encode(contentString));  // Encode the string into a Uint8Array
+    //     const dataWithDelimiter = contentString + "\n";
+    //     controller.enqueue(dataWithDelimiter);  
+    //     controller.close();  // Close the stream after enqueueing
+    //   }
+    // });
+
+    // return new StreamingTextResponse(stream, {
+    //   headers: {
+    //     "x-message-index": (previousMessages.length + 1).toString(),
+    //     "x-sources": serializedSources,
+    //   },
+    // });
   } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: e.status ?? 500 });
   }
